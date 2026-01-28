@@ -3,6 +3,7 @@ all: jacobi
 jacobi:
 	mpicc \
 	  -O3 \
+	  -march=native \
 	  -Wall -Wextra -Wpedantic \
 	  -lm \
 	  -Minfo=all -Mneginfo \

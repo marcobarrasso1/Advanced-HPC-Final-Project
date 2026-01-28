@@ -9,7 +9,7 @@
 static int file_exists(const char *p) { struct stat st; return stat(p,&st)==0; }
 
 int main(int argc, char **argv) {
-    // --- MPI init with threading ---
+
     int provided;
     MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
     if (provided < MPI_THREAD_FUNNELED) {
@@ -49,7 +49,7 @@ if (argc == 6 && (teams <= 0 || threads_per_team <= 0)) {
 
     omp_set_num_threads(nthreads);
 
-    // Pick OpenMP device per rank (works with srun --gpus-per-task=1 or mpirun)
+    // Pick OpenMP device per rank 
     int ngpus = omp_get_num_devices();
     if (ngpus <= 0) {
         if (rank == 0) fprintf(stderr, "No OpenMP target devices. Set OMP_TARGET_OFFLOAD=MANDATORY to catch this.\n");
@@ -59,7 +59,7 @@ if (argc == 6 && (teams <= 0 || threads_per_team <= 0)) {
 
     if (rank == 0) printf("GPUS= %d, MPI ranks=%d, OMP threads/rank=%d, N=%d, iters=%d\n", ngpus, size, nthreads, N, iters);
 
-    // --- 1D row decomposition ---
+    // 1D row decomposition 
     const int rows_per   = N / size;
     const int extra_rows = N % size;
     const int local_rows = rows_per + (rank < extra_rows ? 1 : 0);
@@ -72,29 +72,28 @@ if (argc == 6 && (teams <= 0 || threads_per_team <= 0)) {
     const int total_cols = N + 2;
     const int total_size = total_rows * total_cols;
 
-    // --- allocate on host (MPI_Alloc_mem) ---
+    // allocate on host 
     MPI_Aint bytes = (MPI_Aint)sizeof(double) * (MPI_Aint)total_size;
     double *mat = NULL, *mat_new = NULL;
     MPI_Alloc_mem(bytes, MPI_INFO_NULL, &mat);
     MPI_Alloc_mem(bytes, MPI_INFO_NULL, &mat_new);
 
-    // --- timing ---
     MPI_Barrier(MPI_COMM_WORLD);
     double init_time = 0.0, comm_time = 0.0, comp_time = 0.0;
 
-    // --- initialize on host ---
+    // initialize on host 
     double t0 = MPI_Wtime();
     memset(mat,     0, (size_t)bytes);
     memset(mat_new, 0, (size_t)bytes);
 
-    // interior init
+    // interior initialitzation
     #pragma omp parallel for collapse(2)
     for (int i = 1; i <= local_rows; ++i) {
         for (int j = 1; j <= N; ++j) {
             mat[i*total_cols + j] = 0.5;
         }
     }
-    // boundary init
+    // boundary initialization
     double incr = 100.0 / (N + 1);
     #pragma omp parallel for
     for (int i = 1; i <= local_rows; ++i) {
@@ -103,45 +102,47 @@ if (argc == 6 && (teams <= 0 || threads_per_team <= 0)) {
         mat_new[i*total_cols + 0] = v;
     }
     if (rank == size - 1) {
-        int brow = local_rows + 1;
+        int t = local_rows + 1;
         #pragma omp parallel for
         for (int j = 1; j <= N+1; ++j) {
             double v = j * incr;
             int col = (N + 1) - j;
-            mat    [brow*total_cols + col] = v;
-            mat_new[brow*total_cols + col] = v;
+            mat    [t*total_cols + col] = v;
+            mat_new[t*total_cols + col] = v;
         }
     }
 
     MPI_Barrier(MPI_COMM_WORLD);
     init_time = MPI_Wtime() - t0;
 
-    // --- neighbors ---
     const int above = (rank > 0      ? rank - 1 : MPI_PROC_NULL);
     const int below = (rank < size-1 ? rank + 1 : MPI_PROC_NULL);
 
-    // --- RMA windows on HOST memory (expose first/last interior rows) ---
-    MPI_Win win_top = MPI_WIN_NULL;    // exposes row 1
-    MPI_Win win_bot = MPI_WIN_NULL;    // exposes row local_rows
+    // RMA windows on HOST memory 
+    MPI_Win win_top = MPI_WIN_NULL;    
+    MPI_Win win_bot = MPI_WIN_NULL;   
+
+    // exposes first interior row
     MPI_Win_create(&mat[1 * total_cols],
                    (MPI_Aint)(total_cols * sizeof(double)),
                    (int)sizeof(double), MPI_INFO_NULL, MPI_COMM_WORLD, &win_top);
+
+    // exposes last interior row
     MPI_Win_create(&mat[local_rows * total_cols],
                    (MPI_Aint)(total_cols * sizeof(double)),
                    (int)sizeof(double), MPI_INFO_NULL, MPI_COMM_WORLD, &win_bot);
 
-    // --- OpenMP target mapping (both arrays ping-ponged) ---
-    #pragma omp target data map(tofrom: mat[0:total_size], mat_new[0:total_size])
+    // OpenMP target mapping 
+    #pragma omp target data map(tofrom: mat[0 : total_size], mat_new[0 : total_size])
     {
         for (int it = 0; it < iters; ++it) {
 
-            // 1) bring interior rows to HOST (row 1, row local_rows)
             double tc = MPI_Wtime();
 
-            #pragma omp target update from( mat[1 * total_cols          : total_cols] )
-            #pragma omp target update from( mat[local_rows * total_cols : total_cols] )
+            // bring first and last interior rows to HOST
+            #pragma omp target update from(mat[1 * total_cols : total_cols])
+            #pragma omp target update from(mat[local_rows * total_cols : total_cols])
 
-            // 2) RMA GET: neighbors' interior rows -> my ghost rows (HOST)
             MPI_Win_fence(0, win_top);
             MPI_Win_fence(0, win_bot);
 
@@ -159,15 +160,15 @@ if (argc == 6 && (teams <= 0 || threads_per_team <= 0)) {
             MPI_Win_fence(0, win_top);
             MPI_Win_fence(0, win_bot);
 
-            // 3) push the updated ghost rows to DEVICE
-            #pragma omp target update to( mat[0 * total_cols                : total_cols] )
-            #pragma omp target update to( mat[(local_rows + 1) * total_cols : total_cols] )
+            // push the updated ghost rows to DEVICE
+            #pragma omp target update to(mat[0 * total_cols : total_cols])
+            #pragma omp target update to(mat[(local_rows + 1) * total_cols : total_cols])
 
             comm_time += MPI_Wtime() - tc;
 
-            // 4) GPU compute (one kernel, no copy-back kernel)
+            // GPU computation
             double tp = MPI_Wtime();
-            #pragma omp target teams distribute parallel for collapse(2) thread_limit(threads_per_team) num_teams(teams)
+            #pragma omp target teams distribute parallel for simd collapse(2) thread_limit(threads_per_team) num_teams(teams)
             for (int i = 1; i <= local_rows; ++i) {
                 for (int j = 1; j <= N; ++j) {
                     mat_new[i*total_cols + j] = 0.25 * (
@@ -179,12 +180,11 @@ if (argc == 6 && (teams <= 0 || threads_per_team <= 0)) {
                 }
             }
 
-            // 5) ping-pong
             double *tmp = mat; mat = mat_new; mat_new = tmp;
 
 	    comp_time += MPI_Wtime() - tp;
         }
-    } // end target data
+    } 
     
     double total_wall =init_time + comm_time + comp_time;
 
@@ -192,8 +192,6 @@ if (argc == 6 && (teams <= 0 || threads_per_team <= 0)) {
     MPI_Win_free(&win_top);
     MPI_Win_free(&win_bot);
 
-    // --- timings ---
-    //double total_wall = MPI_Wtime() - prog_t0;
     
     double init_max, comm_max, comp_max;
     MPI_Reduce(&init_time, &init_max, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
@@ -213,7 +211,7 @@ if (argc == 6 && (teams <= 0 || threads_per_team <= 0)) {
        printf("TIME: %.6f \n", total_wall);
     }
 
-    // --- (optional) write a CSV row per rank (append) ---
+    // write a CSV row per rank
     
     if (rank == 0) {
         const char *csv = "times.csv";
@@ -229,10 +227,8 @@ if (argc == 6 && (teams <= 0 || threads_per_team <= 0)) {
         }
     }
      
-    // --- (optional) write solution (global (N+2)x(N+2)) ---
-    // Layout: rank 0 writes its top ghost+interior (rows 0..local_rows),
-    // middle ranks write only interior (start_row+1 .. start_row+local_rows),
-    // last rank writes interior+bottom ghost (start_row+1 .. start_row+local_rows+1).
+    // write solution (global (N+2)x(N+2))
+
     MPI_File fh;
     MPI_File_open(MPI_COMM_WORLD, "solution.bin",
                   MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fh);
@@ -257,7 +253,6 @@ if (argc == 6 && (teams <= 0 || threads_per_team <= 0)) {
     }
     MPI_File_close(&fh);
     
-    // --- cleanup ---
     MPI_Free_mem(mat);
     MPI_Free_mem(mat_new);
     MPI_Finalize();
