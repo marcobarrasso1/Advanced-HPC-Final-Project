@@ -2,7 +2,7 @@
 #SBATCH --job-name=jacobi-scale
 #SBATCH -A ICT25_MHPC_0
 #SBATCH --partition=boost_usr_prod
-#SBATCH --nodes=1                 # max nodes you plan to test
+#SBATCH --nodes=64                 # max nodes you plan to test
 #SBATCH --ntasks-per-node=4        # 1 MPI rank per GPU
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus-per-node=4
